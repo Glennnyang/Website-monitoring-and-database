@@ -12,7 +12,6 @@ in the source code. Copy .env.example to .env and fill in your own values.
 """
 
 import os
-import re
 import time
 import sqlite3
 import traceback
@@ -22,6 +21,7 @@ import smtplib
 
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from plyer import notification
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -47,10 +47,8 @@ EMAIL_APP_PASSWORD = os.environ.get("EMAIL_APP_PASSWORD")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
-# Disable email cleanly if credentials are missing, instead of crashing later.
-if ENABLE_EMAIL_NOTIFICATION and not all([EMAIL_FROM, EMAIL_TO, EMAIL_APP_PASSWORD]):
-    print("[!] Email credentials missing in .env - email notifications disabled.")
-    ENABLE_EMAIL_NOTIFICATION = False
+# Email is only sent when all credentials are present, instead of crashing later.
+EMAIL_READY = all([EMAIL_FROM, EMAIL_TO, EMAIL_APP_PASSWORD])
 
 
 # ===========================================================================
@@ -195,7 +193,7 @@ def extract_apartments(html: str) -> list[dict]:
             apartments.append(
                 {"address": address, "title": title, "price": price, "size": size, "link": link}
             )
-        except Exception as exc:  # keep going even if one listing is malformed
+        except (AttributeError, TypeError) as exc:  # keep going if one listing is malformed
             print(f"[!] Could not parse a listing: {exc}")
 
     return apartments
@@ -206,14 +204,17 @@ def extract_apartments(html: str) -> list[dict]:
 # ===========================================================================
 
 def notify_desktop(title: str, message: str) -> None:
+    """Show a desktop pop-up. Failures are logged but never stop the monitor."""
     try:
-        from plyer import notification
         notification.notify(title=title, message=message, timeout=10)
-    except Exception as exc:
+    # plyer's platform backends raise many different error types, and a failed
+    # pop-up must not prevent the email from being sent.
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         print(f"[!] Desktop notification failed: {exc}")
 
 
 def notify_email(subject: str, body: str) -> None:
+    """Send a plain-text email via SMTP using the credentials from .env."""
     try:
         msg = MIMEText(body)
         msg["Subject"] = subject
@@ -224,14 +225,15 @@ def notify_email(subject: str, body: str) -> None:
             server.login(EMAIL_FROM, EMAIL_APP_PASSWORD)
             server.send_message(msg)
         print("[i] Email sent")
-    except Exception as exc:
+    except (smtplib.SMTPException, OSError) as exc:  # login, connection or network errors
         print(f"[!] Email failed: {exc}")
 
 
 def send(title: str, body: str) -> None:
+    """Send a notification through every channel that is turned on."""
     if ENABLE_DESKTOP_NOTIFICATION:
         notify_desktop(title, body)
-    if ENABLE_EMAIL_NOTIFICATION:
+    if ENABLE_EMAIL_NOTIFICATION and EMAIL_READY:
         notify_email(title, body)
 
 
@@ -240,6 +242,7 @@ def send(title: str, body: str) -> None:
 # ===========================================================================
 
 def run_once(check_number: int) -> None:
+    """Run one check: load the page, store listings and notify about changes."""
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'=' * 70}\n[{stamp}] Check #{check_number}\n{'=' * 70}")
 
@@ -278,11 +281,15 @@ def run_once(check_number: int) -> None:
 
 
 def main() -> None:
+    """Start the monitor and re-check the page until stopped with Ctrl+C."""
     print("=" * 70)
     print("STWDO APARTMENT MONITOR")
     print(f"URL:      {URL}")
     print(f"Interval: {CHECK_INTERVAL_SECONDS}s")
     print("=" * 70)
+
+    if ENABLE_EMAIL_NOTIFICATION and not EMAIL_READY:
+        print("[!] Email credentials missing in .env - email notifications disabled.")
 
     init_database()
 
@@ -292,7 +299,9 @@ def main() -> None:
             check_number += 1
             try:
                 run_once(check_number)
-            except Exception:
+            # Deliberately broad: one failed check (site down, Chrome crash, ...)
+            # must not stop a monitor that is meant to run for days.
+            except Exception:  # pylint: disable=broad-exception-caught
                 print("[ERROR] Check failed:")
                 traceback.print_exc()
             print(f"[*] Sleeping {CHECK_INTERVAL_SECONDS}s... (Ctrl+C to stop)")
