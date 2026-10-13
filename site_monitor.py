@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+"""
 STWDO apartment monitor.
 
 Watches the Studierendenwerk Dortmund (stwdo.de) housing page, stores every
